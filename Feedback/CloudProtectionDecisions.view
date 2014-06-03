@@ -1,0 +1,59 @@
+﻿// Provides a simple to use view containing all decisions taken by cloud protection
+//
+// This view provides a simplification layer on top of RawDssAuditLogs, which contains more detailed information
+// but in a less simple form
+CREATE VIEW CloudProtectionDecisions
+
+SCHEMA
+(
+    ReportTime:DateTime,
+    ReportGuid:string,
+    MachineGuid:string,
+    TrafficType:string,
+    Sha1:string,
+    ShouldBlock:bool,
+    Decision:Microsoft.ProtectionServices.Entities.Raw.CloudProtectionDecision
+)
+
+// Params:
+//  startTime, endTime          Upper and lower boundary on data timestamp
+//  cosmosEnvironmentRootFolder Points to where the input streams are located, default - adhoc production share
+//  filterTestData              Determines whether test data will be returned by view
+//  maxCorruptEntitiesRatio     Determines the max allowed corrupt entities ratio for the job not to fail
+PARAMS (
+    startTime DateTime DEFAULT = DateTime.UtcNow.AddDays(-1),
+    endTime DateTime DEFAULT = DateTime.UtcNow,
+    cosmosEnvironmentRootFolder string DEFAULT = "shares/protection.prod/",
+    internalUseOnlyDistribRootPath string DEFAULT = "/shares/protection.prod/distrib",
+    filterTestData bool DEFAULT = true,
+    maxCorruptEntitiesRatio string DEFAULT = "0.01")
+
+AS
+BEGIN
+
+    USING Microsoft.ProtectionServices.Entities.Raw;
+    USING Microsoft.Bond;
+
+    DssAuditLogs = 
+        VIEW @"RawDssAuditLogs.view"
+        PARAMS 
+        ( startTime = @startTime,
+          endTime = @endTime,
+          rawRootPath = @cosmosEnvironmentRootFolder,
+          internalUseOnlyDistribRootPath = @internalUseOnlyDistribRootPath,
+          filterTestData = @filterTestData,
+          maxCorruptEntitiesRatio = @maxCorruptEntitiesRatio
+        );
+
+    SELECT 
+           DssLogs.GetReportTime() AS ReportTime,
+           DssLogs.ReportGuidRaw AS ReportGuid, 
+           DssLogs.MachineGuidRaw AS MachineGuid,
+           DssLogs.ContextInfo.TrafficType.ToString() AS TrafficType,
+           Decision.Query.Sha1Raw AS Sha1,
+           Decision.ShouldBlock,
+           Decision
+    FROM DssAuditLogs 
+    CROSS APPLY DssLogs.CloudProtectionDecisions AS Decision;
+
+END;

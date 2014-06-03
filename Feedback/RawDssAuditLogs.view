@@ -1,0 +1,143 @@
+﻿CREATE VIEW RawDssAuditLogs
+
+SCHEMA
+(
+        DssLogs:Microsoft.ProtectionServices.Entities.Raw.DssQueryResponseLog
+)
+
+// Params:
+// startTime - determines the lower boundary for the returned DSS logs. By default, it's yesterday (UTC).
+// endTime - determines the upper boundary for the returned DSS logs. By default, it's now (UTC).
+// rawRootPath - 
+//      Should have been called cosmosEnvironmentRootFolder, was not renamed for backwards compatibility considerations.
+//      Should point to where "raw", "processed" and other data folders are located.
+// streamPath -
+//      Should be provided only in test and troubleshooting runs.
+//      When provided, DSS logs will be read from this stream rather than from the main DSS logs streamset
+//      according to the given dates and root path.
+// filterTestData -
+//      Determines whether test data will be return by view. 
+//      Default value filters test data.
+// maxCorruptEntitiesRatio -
+//      Determines the max allowed corrupt entities ratio for the data a job will run on
+PARAMS (startTime DateTime DEFAULT = DateTime.UtcNow.AddDays(-1),
+        endTime DateTime DEFAULT = DateTime.UtcNow,
+        rawRootPath string DEFAULT = "shares/protection.prod/",
+        internalUseOnlyDistribRootPath string DEFAULT = "/shares/protection.prod/distrib",
+        streamPath string DEFAULT = "",
+        filterTestData bool DEFAULT = true,
+        maxCorruptEntitiesRatio string DEFAULT = "0.01")
+
+AS
+
+BEGIN
+    #IF (NOT string.IsNullOrEmpty(@internalUseOnlyDistribRootPath))
+        #IF (NOT @internalUseOnlyDistribRootPath.EndsWith("/")) 
+            #SET internalUseOnlyDistribRootPath = @internalUseOnlyDistribRootPath + "/";
+        #ENDIF
+        #DECLARE r1 string = @internalUseOnlyDistribRootPath + "BondEntities.dll";                           REFERENCE @r1;
+        #DECLARE r2 string = @internalUseOnlyDistribRootPath + "CosmosCommonUserDefinedObjects.dll";         REFERENCE @r2;
+        #DECLARE r3 string = @internalUseOnlyDistribRootPath + "Microsoft.Bond.dll";                         REFERENCE @r3;
+        #DECLARE r4 string = @internalUseOnlyDistribRootPath + "Microsoft.Bond.Interfaces.dll";              REFERENCE @r4;
+        #DECLARE r5 string = @internalUseOnlyDistribRootPath + "BondEntitiesUtilities.dll";                  REFERENCE @r5;
+        #DECLARE r6 string = @internalUseOnlyDistribRootPath + "ScopeInfra.dll";                             REFERENCE @r6;
+    #ENDIF
+
+    USING Microsoft.Bond;
+    USING Microsoft.ProtectionServices.BigData.CosmosCommonUserDefinedObjects;
+    USING System;
+    USING System.Globalization;
+
+    #DECLARE DssLogEntityTypeName string = "Microsoft.ProtectionServices.Entities.Raw.DssQueryResponseLog, BondEntities, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null";
+    #DECLARE maxCorruptEntitiesRatioParam string = "maxCorruptEntitiesRatio=" + @maxCorruptEntitiesRatio;
+
+    #IF (string.IsNullOrEmpty(@streamPath))
+        #IF (NOT @rawRootPath.EndsWith("/")) 
+            #SET rawRootPath = @rawRootPath + "/";
+        #ENDIF
+        #IF (NOT @rawRootPath.EndsWith("raw/DssQueryResponseLog/")) 
+            #SET rawRootPath = @rawRootPath + "raw/DssQueryResponseLog/";
+        #ENDIF
+
+        // constants
+        #DECLARE dateFormat string = "yyyy-MM-dd";
+        #DECLARE streamPathTemplate string = @rawRootPath + "%Y/%m/%d/DssQueryResponseLog_%h.bond.base64?date={0}...{1}&hour={2}...{3}&sparsestreamset=true";
+        #DECLARE safetyMarginMinutes int = 30;
+
+        // boundaries with safety margins
+        #DECLARE startTimeWithMargin DateTime = @startTime.ToUniversalTime().AddMinutes(-@safetyMarginMinutes);
+        #DECLARE endTimeWithMargin DateTime = @endTime.ToUniversalTime().AddMinutes(@safetyMarginMinutes);
+
+        // target streams - the period can be divided to 3 parts (at most):
+        #DECLARE streamSetLeftAddition string = null;  // covers the period from startTime to the first day boundary (or to endTime, whatever is least)
+        #DECLARE streamSetFullDays string = null;      // covers all the full days within the period (remains null in some scenarios)
+        #DECLARE streamSetRightAddition string = null; // covers the period from last day boundary to the endTime (remains null in some scenarios)
+
+        #IF (@startTime > @endTime)
+            #ERROR @"startTime must be less than or equal to the endTime parameter";
+        #ENDIF
+
+        #IF (@startTimeWithMargin.Date == @endTimeWithMargin.Date)
+            // the whole period is within the same day
+            #SET streamSetLeftAddition = string.Format(
+                @streamPathTemplate,
+                @startTimeWithMargin.ToString(@dateFormat), @endTimeWithMargin.ToString(@dateFormat),
+                @startTimeWithMargin.Hour, @endTimeWithMargin.Hour);
+        #ELSE
+            // start and end dates are either 2 subsequent days, which is covered by 2 adjacent streamsets,
+            // or the period contains some full days in between, which also requires to populate the "non-full-days" streams
+            #SET streamSetLeftAddition = string.Format(
+                @streamPathTemplate,
+                @startTimeWithMargin.ToString(@dateFormat), @startTimeWithMargin.ToString(@dateFormat),
+                @startTimeWithMargin.Hour, 23);
+
+            #SET streamSetRightAddition = string.Format(
+                @streamPathTemplate,
+                @endTimeWithMargin.ToString(@dateFormat), @endTimeWithMargin.ToString(@dateFormat),
+                0, @endTimeWithMargin.Hour);
+
+            #IF (@startTimeWithMargin.Date.AddDays(1.0) < @endTimeWithMargin.Date)
+                // if there are some full days in between - should add another streamset to cover the full days
+                #SET streamSetFullDays = string.Format(
+                    @streamPathTemplate,
+                    @startTimeWithMargin.Date.AddDays(1.0).ToString(@dateFormat), @endTimeWithMargin.Date.AddDays(-1.0).ToString(@dateFormat),
+                    0, 23);
+            #ENDIF
+        #ENDIF
+
+        // -----------This part is to enable the view to be backward compatible--------------------------------
+        #DECLARE oldStreamPathTemplate string = @rawRootPath + "%Y/%m/%d/DssQueryResponseLog.bond.base64?date={0}...{1}&sparsestreamset=true";
+        #DECLARE oldStreamPath string = string.Format(
+        @oldStreamPathTemplate, 
+        @startTimeWithMargin.ToString(@dateFormat), 
+        @endTimeWithMargin.ToString(@dateFormat));
+        // -----------------------------------------------------------------------------------------------------
+
+    #ENDIF
+
+    EXTRACT
+        DssLogs:Microsoft.ProtectionServices.Entities.Raw.DssQueryResponseLog
+    FROM
+    #IF (NOT string.IsNullOrEmpty(@streamPath))
+        @streamPath
+    #ELSE
+        @oldStreamPath,
+        #IF (NOT string.IsNullOrEmpty(@streamSetFullDays))
+            @streamSetLeftAddition, @streamSetFullDays, @streamSetRightAddition
+        #ELSE
+            #IF (NOT string.IsNullOrEmpty(@streamSetRightAddition))
+                @streamSetLeftAddition, @streamSetRightAddition
+            #ELSE
+                @streamSetLeftAddition      
+            #ENDIF
+        #ENDIF
+    #ENDIF
+    USING 
+        BondExtractor(@DssLogEntityTypeName, "Base64Bond", @maxCorruptEntitiesRatioParam)
+    HAVING
+    #IF(@filterTestData)
+        DssLogs.ContextInfo.TrafficType == Microsoft.ProtectionServices.Entities.TrafficType.Production AND
+    #ENDIF
+    ALL(DssLogs.ReportTime >= @startTime.ToUniversalTime().Ticks,
+        DssLogs.ReportTime <= @endTime.ToUniversalTime().Ticks);
+END;

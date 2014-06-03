@@ -1,0 +1,62 @@
+﻿//Script GUID:a97857b5-da3a-4a73-8703-77a1d01965ae
+//Used for tracking history
+
+USING Microsoft.ProtectionServices.Entities.Raw;
+//USING Microsoft.ProtectionServices.;
+
+#DECLARE cloudDecisionsViewPath string = @"CloudProtectionDecisions.view";
+#DECLARE auditLogsViewPath string = @"RawDssAuditLogs.view";
+#DECLARE CloudDecisionsStream string = @"my/feedback_test/CloudDecisions.ss";
+#DECLARE outputPath string;
+
+
+//* Create copy of cloud decisions
+
+#DECLARE endTime DateTime = DateTime.UtcNow.Date;
+#DECLARE startTime DateTime = @endTime.AddDays(-14);
+#DECLARE internalUseOnlyDistribRootPath string = null;
+
+Dss = VIEW @auditLogsViewPath;
+Dss = 
+    SELECT TOP 100 *
+    FROM Dss;
+
+OUTPUT Dss 
+TO SSTREAM "my/dssView.ss"
+WITH STREAMEXPIRY "1";
+/*/
+
+cloudDecision = 
+    SSTREAM @CloudDecisionsStream;
+
+evaluatorDecisions = 
+    SELECT Sha1,
+           Decision.EvaluatorResponses AS Predicions
+    FROM cloudDecision;
+
+feedback =
+    PROCESS evaluatorDecisions
+    PRODUCE Sha1, 
+            EvaluatorName, 
+            Prediction, 
+            Actual
+    USING RuleProcessor;
+
+DecisionsConfusionMatrix =
+    SELECT EvaluatorName,
+           COUNTIF(Prediction == "Malware" AND Actual == "Malware") AS TP,
+           COUNTIF(Prediction == "Malware" AND Actual == "Clean") AS FP,
+           COUNTIF(Prediction == "Malware" AND Actual == "Unknown") AS UP,
+           COUNTIF(Prediction == "Clean" AND Actual == "Malware") AS FN,
+           COUNTIF(Prediction == "Clean" AND Actual == "Clean") AS TN, 
+           COUNTIF(Prediction == "Clean" AND Actual == "Unknown") AS UN,
+           COUNTIF(Prediction == "Unknown" AND Actual == "Malware") AS PU,
+           COUNTIF(Prediction == "Unknown" AND Actual == "Clean") AS NU,
+           COUNTIF(Prediction == "Unknown" AND Actual == "Unknown") AS UU
+    FROM feedback;
+
+#SET outputPath = @"/my/feedback_test/DecisionsConfusionMatrix.ss";
+OUTPUT DecisionsConfusionMatrix 
+TO SSTREAM @outputPath
+WITH STREAMEXPIRY "1";
+//*/
